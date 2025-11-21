@@ -11,16 +11,18 @@ interface CalendarViewProps {
   externalEvents?: ExternalEvent[];
   calendarIntegration?: CalendarIntegration;
   onConnectCalendar: () => void;
+  onRefreshCalendar?: () => Promise<void>;
 }
 
-export const CalendarView: React.FC<CalendarViewProps> = ({ 
-  patients, 
-  onScheduleVisit, 
-  isScheduleModalOpen, 
+export const CalendarView: React.FC<CalendarViewProps> = ({
+  patients,
+  onScheduleVisit,
+  isScheduleModalOpen,
   setIsScheduleModalOpen,
   externalEvents = [],
   calendarIntegration,
-  onConnectCalendar
+  onConnectCalendar,
+  onRefreshCalendar
 }) => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -129,9 +131,16 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     setSelectedExternalEvent(event);
   };
 
-  const handleSyncClick = () => {
+  const handleSyncClick = async () => {
+    if (!onRefreshCalendar) return;
     setIsSyncing(true);
-    setTimeout(() => setIsSyncing(false), 1500);
+    try {
+      await onRefreshCalendar();
+    } catch (error) {
+      console.error('Failed to sync calendar:', error);
+    } finally {
+      setTimeout(() => setIsSyncing(false), 500);
+    }
   };
 
   const handleSubmitSchedule = (e: React.FormEvent) => {

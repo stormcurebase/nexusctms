@@ -7,14 +7,18 @@ interface SettingsViewProps {
   receptionistConfig?: ReceptionistConfig;
   onUpdateConfig?: (config: ReceptionistConfig) => void;
   calendarIntegration?: CalendarIntegration;
-  onUpdateIntegration?: (integration: CalendarIntegration) => void;
+  onConnectCalendar?: () => void;
+  onDisconnectCalendar?: () => Promise<void>;
+  onRefreshCalendar?: () => Promise<void>;
 }
 
-export const SettingsView: React.FC<SettingsViewProps> = ({ 
-  receptionistConfig, 
+export const SettingsView: React.FC<SettingsViewProps> = ({
+  receptionistConfig,
   onUpdateConfig,
   calendarIntegration,
-  onUpdateIntegration
+  onConnectCalendar,
+  onDisconnectCalendar,
+  onRefreshCalendar
 }) => {
   const [localConfig, setLocalConfig] = useState<ReceptionistConfig>(receptionistConfig || {
     clinicName: '',
@@ -26,6 +30,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   });
 
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   const handleSave = () => {
     if (onUpdateConfig) {
@@ -35,31 +40,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const handleConnectGoogle = () => {
-    if (!onUpdateIntegration) return;
-    
-    setIsConnecting(true);
-    // Simulate API OAuth delay
-    setTimeout(() => {
-      onUpdateIntegration({
-        isConnected: true,
-        provider: 'Google',
-        accountName: 'dr.jane.doe@gmail.com',
-        lastSynced: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-        syncDirection: 'Two-Way'
-      });
-      setIsConnecting(false);
-    }, 2000);
+    if (onConnectCalendar) {
+      setIsConnecting(true);
+      onConnectCalendar();
+    }
   };
 
-  const handleDisconnect = () => {
-    if (onUpdateIntegration) {
-      onUpdateIntegration({
-        isConnected: false,
-        provider: null,
-        accountName: null,
-        lastSynced: null,
-        syncDirection: 'Two-Way'
-      });
+  const handleDisconnect = async () => {
+    if (onDisconnectCalendar) {
+      await onDisconnectCalendar();
+    }
+  };
+
+  const handleRefresh = async () => {
+    if (onRefreshCalendar) {
+      setIsSyncing(true);
+      try {
+        await onRefreshCalendar();
+      } catch (error) {
+        console.error('Failed to sync:', error);
+      } finally {
+        setIsSyncing(false);
+      }
     }
   };
 
@@ -98,9 +100,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         <span className="text-xs font-medium text-green-600 flex items-center gap-1">
                            <CheckCircle size={12} /> Connected: {calendarIntegration.accountName}
                         </span>
-                        <span className="text-xs text-slate-400 flex items-center gap-1">
-                           <RefreshCw size={12} /> Last synced: {calendarIntegration.lastSynced}
-                        </span>
+                        <button
+                          onClick={handleRefresh}
+                          disabled={isSyncing}
+                          className="text-xs text-slate-400 hover:text-blue-600 flex items-center gap-1 transition-colors disabled:opacity-50"
+                        >
+                           <RefreshCw size={12} className={isSyncing ? 'animate-spin' : ''} /> {isSyncing ? 'Syncing...' : `Last: ${calendarIntegration.lastSynced}`}
+                        </button>
                       </div>
                     ) : (
                       <p className="text-sm text-slate-500">Sync your schedule to avoid conflicts.</p>

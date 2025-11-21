@@ -20,6 +20,7 @@ export interface Visit {
   date: string; // ISO date string
   status: 'Scheduled' | 'Completed' | 'Missed' | 'Overdue';
   notes?: string;
+  googleEventId?: string; // For mapping to Google Calendar events
 }
 
 export interface AdverseEvent {
@@ -122,6 +123,7 @@ export interface CalendarIntegration {
   accountName: string | null;
   lastSynced: string | null;
   syncDirection: 'Two-Way' | 'Import Only';
+  userId?: string; // Per-user calendar integration
 }
 
 export interface ExternalEvent {
@@ -131,4 +133,38 @@ export interface ExternalEvent {
   time: string;
   source: 'Google' | 'Outlook';
   isAllDay?: boolean;
+  isRecurring?: boolean;
+  recurrenceRule?: string;
+}
+
+export interface CalendarToken {
+  id: string;
+  userId: string;
+  accessToken: string;
+  refreshToken: string;
+  tokenExpiry: string;
+  googleEmail: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EventMapping {
+  id: string;
+  userId: string;
+  ctmsVisitId: string;
+  googleEventId: string;
+  studyId?: string;
+  patientId?: string;
+  lastSynced: string;
+  syncDirection: 'ctms_to_google' | 'google_to_ctms';
+}
+
+export interface SyncLogEntry {
+  id: string;
+  userId: string;
+  action: 'fetch' | 'create' | 'update' | 'delete' | 'oauth';
+  status: 'success' | 'error' | 'pending';
+  errorMessage?: string;
+  eventId?: string;
+  timestamp: string;
 }

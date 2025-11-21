@@ -9,8 +9,10 @@ import { SettingsView } from './components/SettingsView';
 import { StudyManager } from './components/StudyManager';
 import { VoiceReceptionist } from './components/VoiceReceptionist';
 import { AddStudyModal } from './components/AddStudyModal';
+import { GoogleOAuthCallback } from './components/GoogleOAuthCallback';
 import { MOCK_PATIENTS, MOCK_STUDIES } from './constants';
 import { Patient, Visit, TaskAlert, ReceptionistConfig, StudyDetails, AdverseEvent, CalendarIntegration, ExternalEvent } from './types';
+import { GoogleCalendarService } from './services/googleCalendarService';
 
 const App: React.FC = () => {
   const [currentView, setCurrentView] = useState('dashboard');
@@ -37,30 +39,75 @@ const App: React.FC = () => {
     patients.filter(p => p.studyId === currentStudyId)
   , [patients, currentStudyId]);
 
+  const [currentUserId] = useState('demo-user-1');
+  const calendarService = useMemo(() => new GoogleCalendarService(currentUserId), [currentUserId]);
+
   // Calendar Integration State
   const [calendarIntegration, setCalendarIntegration] = useState<CalendarIntegration>({
     isConnected: false,
     provider: null,
     accountName: null,
     lastSynced: null,
-    syncDirection: 'Two-Way'
+    syncDirection: 'Two-Way',
+    userId: currentUserId
   });
 
-  // Mock External Events (generated dynamically for current month to ensure they appear)
-  const externalEvents = useMemo<ExternalEvent[]>(() => {
-     if (!calendarIntegration.isConnected) return [];
-     
-     const today = new Date();
-     const year = today.getFullYear();
-     const month = String(today.getMonth() + 1).padStart(2, '0');
-     
-     return [
-       { id: 'ext-1', title: 'Dentist Appointment', date: `${year}-${month}-05`, time: '14:00', source: 'Google' },
-       { id: 'ext-2', title: 'Team Meeting', date: `${year}-${month}-12`, time: '10:00', source: 'Google' },
-       { id: 'ext-3', title: 'Conference Call', date: `${year}-${month}-20`, time: '15:30', source: 'Google' },
-       { id: 'ext-4', title: 'Personal Day', date: `${year}-${month}-25`, time: 'All Day', source: 'Google', isAllDay: true },
-     ];
-  }, [calendarIntegration.isConnected]);
+  const [externalEvents, setExternalEvents] = useState<ExternalEvent[]>([]);
+  const [isOAuthInProgress, setIsOAuthInProgress] = useState(false);
+
+  useEffect(() => {
+    const checkCalendarConnection = async () => {
+      const status = await calendarService.getConnectionStatus();
+      if (status.connected) {
+        setCalendarIntegration({
+          isConnected: true,
+          provider: 'Google',
+          accountName: status.email || null,
+          lastSynced: status.lastSynced || null,
+          syncDirection: 'Two-Way',
+          userId: currentUserId
+        });
+        await fetchCalendarEvents();
+      }
+    };
+    checkCalendarConnection();
+  }, [calendarService, currentUserId]);
+
+  useEffect(() => {
+    const handleOAuthCode = async (event: any) => {
+      const { code } = event.detail;
+      const result = await calendarService.handleOAuthCallback(code);
+
+      if (result.success && result.email) {
+        setCalendarIntegration({
+          isConnected: true,
+          provider: 'Google',
+          accountName: result.email,
+          lastSynced: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+          syncDirection: 'Two-Way',
+          userId: currentUserId
+        });
+        await fetchCalendarEvents();
+        setIsOAuthInProgress(false);
+      }
+    };
+
+    window.addEventListener('google-oauth-code', handleOAuthCode);
+    return () => window.removeEventListener('google-oauth-code', handleOAuthCode);
+  }, [calendarService, currentUserId]);
+
+  const fetchCalendarEvents = async () => {
+    try {
+      const today = new Date();
+      const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+      const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+
+      const events = await calendarService.fetchEvents(startOfMonth, endOfMonth);
+      setExternalEvents(events);
+    } catch (error) {
+      console.error('Failed to fetch calendar events:', error);
+    }
+  };
 
   // Alerts State
   // We start with manual alerts, but we will also generate system alerts dynamically
@@ -186,21 +233,35 @@ const App: React.FC = () => {
     setPatients(prev => prev.map(p => p.id === updatedPatient.id ? updatedPatient : p));
   };
 
-  const handleScheduleVisit = (patientId: string, newVisit: Omit<Visit, 'id'>) => {
+  const handleScheduleVisit = async (patientId: string, newVisit: Omit<Visit, 'id'>) => {
+    const visit: Visit = {
+      ...newVisit,
+      id: `V-${Date.now()}`
+    };
+
+    const patient = patients.find(p => p.id === patientId);
+
+    if (calendarIntegration.isConnected && patient) {
+      const result = await calendarService.createEvent(
+        visit,
+        `${patient.firstName} ${patient.lastName}`,
+        patient.studyId,
+        patient.id
+      );
+
+      if (result.success && result.eventId) {
+        visit.googleEventId = result.eventId;
+      }
+    }
+
     setPatients(prev => prev.map(p => {
       if (p.id === patientId) {
-        const visit: Visit = {
-          ...newVisit,
-          id: `V-${Date.now()}`
-        };
-        // Insert and sort by date
         const updatedVisits = [...p.visits, visit].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
         return { ...p, visits: updatedVisits };
       }
       return p;
     }));
-    
-    const patient = patients.find(p => p.id === patientId);
+
     handleAddAlert({
       category: 'Appointment',
       priority: 'Low',
@@ -208,11 +269,6 @@ const App: React.FC = () => {
       patientId,
       studyId: patient?.studyId
     });
-
-    if (calendarIntegration.isConnected) {
-       // Simulate syncing back to Google
-       console.log("Syncing new visit to Google Calendar...");
-    }
   };
 
   const handleRescheduleVisit = (patientId: string, visitId: string, newDate: string) => {
@@ -311,14 +367,19 @@ const App: React.FC = () => {
             />
           )}
           {currentView === 'visits' && (
-            <CalendarView 
+            <CalendarView
               patients={currentStudyPatients}
               onScheduleVisit={handleScheduleVisit}
               isScheduleModalOpen={isScheduleModalOpen}
               setIsScheduleModalOpen={setIsScheduleModalOpen}
               externalEvents={externalEvents}
               calendarIntegration={calendarIntegration}
-              onConnectCalendar={() => setCurrentView('settings')}
+              onConnectCalendar={() => {
+                const authUrl = calendarService.getAuthUrl();
+                window.location.href = authUrl;
+                setIsOAuthInProgress(true);
+              }}
+              onRefreshCalendar={fetchCalendarEvents}
             />
           )}
           {currentView === 'reports' && (
@@ -328,11 +389,28 @@ const App: React.FC = () => {
              />
           )}
           {currentView === 'settings' && (
-             <SettingsView 
+             <SettingsView
                 receptionistConfig={receptionistConfig}
                 onUpdateConfig={setReceptionistConfig}
                 calendarIntegration={calendarIntegration}
-                onUpdateIntegration={setCalendarIntegration}
+                onConnectCalendar={async () => {
+                  const authUrl = calendarService.getAuthUrl();
+                  window.location.href = authUrl;
+                  setIsOAuthInProgress(true);
+                }}
+                onDisconnectCalendar={async () => {
+                  await calendarService.disconnect();
+                  setCalendarIntegration({
+                    isConnected: false,
+                    provider: null,
+                    accountName: null,
+                    lastSynced: null,
+                    syncDirection: 'Two-Way',
+                    userId: currentUserId
+                  });
+                  setExternalEvents([]);
+                }}
+                onRefreshCalendar={fetchCalendarEvents}
              />
           )}
         </div>
@@ -355,9 +433,22 @@ const App: React.FC = () => {
           }}
         />
 
+        {/* OAuth Callback Handler */}
+        {(window.location.search.includes('code=') || isOAuthInProgress) && (
+          <GoogleOAuthCallback
+            onSuccess={(email) => {
+              console.log('OAuth success:', email);
+            }}
+            onError={(error) => {
+              console.error('OAuth error:', error);
+              setIsOAuthInProgress(false);
+            }}
+          />
+        )}
+
         {/* Modals */}
         {isAddStudyModalOpen && (
-          <AddStudyModal 
+          <AddStudyModal
             onClose={() => setIsAddStudyModalOpen(false)}
             onAdd={handleAddStudy}
           />
