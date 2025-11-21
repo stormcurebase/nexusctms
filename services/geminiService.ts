@@ -2,7 +2,14 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
 // Helper to get client instance
-const getAiClient = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
+const getAiClient = () => {
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+  if (!apiKey) {
+    console.warn('VITE_GEMINI_API_KEY not configured. AI features will be disabled.');
+    throw new Error('Gemini API key not configured');
+  }
+  return new GoogleGenAI({ apiKey });
+};
 
 export const checkEligibility = async (patientNotes: string, protocolText: string): Promise<{ eligible: string; reasoning: string }> => {
   try {

@@ -452,7 +452,14 @@ export const VoiceReceptionist: React.FC<VoiceReceptionistProps> = ({
     }, 15000);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      if (!apiKey) {
+        alert('Gemini API key not configured. Voice features require a valid API key.');
+        setIsConnecting(false);
+        setMode('idle');
+        return;
+      }
+      const ai = new GoogleGenAI({ apiKey });
       
       // Initialize Audio
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
