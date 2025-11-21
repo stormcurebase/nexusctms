@@ -86,6 +86,18 @@ npm run dev
 7. You'll be redirected back to your application
 8. Your calendar should now show as connected!
 
+## Architecture
+
+The integration uses Supabase Edge Functions to securely handle Google Calendar API calls:
+
+- **Edge Functions**: Two deployed functions handle OAuth and calendar operations
+  - `google-calendar-oauth`: Handles OAuth token exchange
+  - `google-calendar-sync`: Manages calendar CRUD operations
+- **Client-Side Service**: Browser-based service communicates with edge functions
+- **Database**: Supabase stores tokens, mappings, and sync logs with RLS
+
+This architecture keeps your Google credentials secure and ensures the Node.js `googleapis` library runs in the proper server environment.
+
 ## How It Works
 
 ### Two-Way Sync

@@ -1,11 +1,10 @@
-import { google } from 'googleapis';
 import { supabase } from '../lib/supabase';
-import { ExternalEvent, Visit, EventMapping, SyncLogEntry } from '../types';
-import { RRule } from 'rrule';
+import { ExternalEvent, Visit } from '../types';
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = import.meta.env.VITE_GOOGLE_CLIENT_SECRET || '';
 const REDIRECT_URI = import.meta.env.VITE_GOOGLE_REDIRECT_URI || 'http://localhost:5173/auth/callback';
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/calendar.events',
@@ -20,7 +19,7 @@ export class GoogleCalendarService {
     this.userId = userId;
   }
 
-  async logSync(action: SyncLogEntry['action'], status: SyncLogEntry['status'], errorMessage?: string, eventId?: string) {
+  async logSync(action: string, status: string, errorMessage?: string, eventId?: string) {
     try {
       await supabase.from('calendar_sync_log').insert({
         user_id: this.userId,
@@ -36,47 +35,52 @@ export class GoogleCalendarService {
   }
 
   getAuthUrl(): string {
-    const oauth2Client = new google.auth.OAuth2(
-      GOOGLE_CLIENT_ID,
-      GOOGLE_CLIENT_SECRET,
-      REDIRECT_URI
-    );
-
-    return oauth2Client.generateAuthUrl({
+    const params = new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      redirect_uri: REDIRECT_URI,
+      response_type: 'code',
+      scope: SCOPES.join(' '),
       access_type: 'offline',
-      scope: SCOPES,
       prompt: 'consent'
     });
+
+    return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
   }
 
   async handleOAuthCallback(code: string): Promise<{ success: boolean; email?: string; error?: string }> {
     try {
-      const oauth2Client = new google.auth.OAuth2(
-        GOOGLE_CLIENT_ID,
-        GOOGLE_CLIENT_SECRET,
-        REDIRECT_URI
-      );
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/google-calendar-oauth`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify({
+          code,
+          clientId: GOOGLE_CLIENT_ID,
+          clientSecret: GOOGLE_CLIENT_SECRET,
+          redirectUri: REDIRECT_URI
+        })
+      });
 
-      const { tokens } = await oauth2Client.getToken(code);
-
-      if (!tokens.access_token || !tokens.refresh_token) {
-        throw new Error('Missing tokens from OAuth response');
+      if (!response.ok) {
+        throw new Error('OAuth request failed');
       }
 
-      oauth2Client.setCredentials(tokens);
+      const data = await response.json();
 
-      const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
-      const userInfo = await oauth2.userinfo.get();
-      const email = userInfo.data.email || '';
+      if (!data.success) {
+        throw new Error(data.error || 'OAuth failed');
+      }
 
-      const expiryDate = tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : new Date(Date.now() + 3600000).toISOString();
+      const expiryDate = new Date(Date.now() + (data.expiresIn * 1000)).toISOString();
 
       const { error } = await supabase.from('calendar_tokens').upsert({
         user_id: this.userId,
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
+        access_token: data.accessToken,
+        refresh_token: data.refreshToken,
         token_expiry: expiryDate,
-        google_email: email,
+        google_email: data.email,
         updated_at: new Date().toISOString()
       }, {
         onConflict: 'user_id'
@@ -86,14 +90,14 @@ export class GoogleCalendarService {
 
       await this.logSync('oauth', 'success');
 
-      return { success: true, email };
+      return { success: true, email: data.email };
     } catch (error) {
       await this.logSync('oauth', 'error', error instanceof Error ? error.message : 'Unknown error');
       return { success: false, error: error instanceof Error ? error.message : 'OAuth failed' };
     }
   }
 
-  async getAuthClient() {
+  async getTokens() {
     const { data, error } = await supabase
       .from('calendar_tokens')
       .select('*')
@@ -104,58 +108,56 @@ export class GoogleCalendarService {
       throw new Error('No calendar token found. Please connect your Google Calendar.');
     }
 
-    const oauth2Client = new google.auth.OAuth2(
-      GOOGLE_CLIENT_ID,
-      GOOGLE_CLIENT_SECRET,
-      REDIRECT_URI
-    );
+    return data;
+  }
 
-    const tokenExpiry = new Date(data.token_expiry);
-    const now = new Date();
-
-    if (now >= new Date(tokenExpiry.getTime() - 5 * 60 * 1000)) {
-      oauth2Client.setCredentials({
-        refresh_token: data.refresh_token
-      });
-
-      const { credentials } = await oauth2Client.refreshAccessToken();
-
-      if (credentials.access_token) {
-        const newExpiry = credentials.expiry_date ? new Date(credentials.expiry_date).toISOString() : new Date(Date.now() + 3600000).toISOString();
-
-        await supabase.from('calendar_tokens').update({
-          access_token: credentials.access_token,
-          token_expiry: newExpiry,
-          updated_at: new Date().toISOString()
-        }).eq('user_id', this.userId);
-      }
-    } else {
-      oauth2Client.setCredentials({
-        access_token: data.access_token,
-        refresh_token: data.refresh_token,
-        expiry_date: tokenExpiry.getTime()
-      });
+  async updateTokenIfNeeded(newAccessToken: string | null) {
+    if (newAccessToken) {
+      const expiryDate = new Date(Date.now() + 3600000).toISOString();
+      await supabase.from('calendar_tokens').update({
+        access_token: newAccessToken,
+        token_expiry: expiryDate,
+        updated_at: new Date().toISOString()
+      }).eq('user_id', this.userId);
     }
-
-    return oauth2Client;
   }
 
   async fetchEvents(startDate: Date, endDate: Date): Promise<ExternalEvent[]> {
     try {
-      const auth = await this.getAuthClient();
-      const calendar = google.calendar({ version: 'v3', auth });
+      const tokens = await this.getTokens();
 
-      const response = await calendar.events.list({
-        calendarId: 'primary',
-        timeMin: startDate.toISOString(),
-        timeMax: endDate.toISOString(),
-        singleEvents: true,
-        orderBy: 'startTime'
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/google-calendar-sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify({
+          action: 'fetch',
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          clientId: GOOGLE_CLIENT_ID,
+          clientSecret: GOOGLE_CLIENT_SECRET,
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString()
+        })
       });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch events');
+      }
+
+      const data = await response.json();
+
+      if (!data.success) {
+        throw new Error(data.error || 'Fetch failed');
+      }
+
+      await this.updateTokenIfNeeded(data.newAccessToken);
 
       const events: ExternalEvent[] = [];
 
-      for (const event of response.data.items || []) {
+      for (const event of data.events || []) {
         if (!event.start) continue;
 
         const startDateTime = event.start.dateTime || event.start.date;
@@ -190,8 +192,7 @@ export class GoogleCalendarService {
 
   async createEvent(visit: Visit, patientName: string, studyId: string, patientId: string): Promise<{ success: boolean; eventId?: string; error?: string }> {
     try {
-      const auth = await this.getAuthClient();
-      const calendar = google.calendar({ version: 'v3', auth });
+      const tokens = await this.getTokens();
 
       const visitDate = new Date(visit.date);
       const timeMatch = visit.notes?.match(/Time: (\d{2}:\d{2})/);
@@ -223,12 +224,35 @@ export class GoogleCalendarService {
         }
       };
 
-      const response = await calendar.events.insert({
-        calendarId: 'primary',
-        requestBody: event
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/google-calendar-sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify({
+          action: 'create',
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          clientId: GOOGLE_CLIENT_ID,
+          clientSecret: GOOGLE_CLIENT_SECRET,
+          event
+        })
       });
 
-      const googleEventId = response.data.id;
+      if (!response.ok) {
+        throw new Error('Failed to create event');
+      }
+
+      const data = await response.json();
+
+      if (!data.success) {
+        throw new Error(data.error || 'Create failed');
+      }
+
+      await this.updateTokenIfNeeded(data.newAccessToken);
+
+      const googleEventId = data.eventId;
 
       if (googleEventId) {
         await supabase.from('calendar_event_mappings').insert({
@@ -246,7 +270,7 @@ export class GoogleCalendarService {
         return { success: true, eventId: googleEventId };
       }
 
-      throw new Error('No event ID returned from Google');
+      throw new Error('No event ID returned');
     } catch (error) {
       await this.logSync('create', 'error', error instanceof Error ? error.message : 'Create failed', visit.id);
       return { success: false, error: error instanceof Error ? error.message : 'Failed to create event' };
@@ -266,8 +290,7 @@ export class GoogleCalendarService {
         return { success: false, error: 'No mapping found' };
       }
 
-      const auth = await this.getAuthClient();
-      const calendar = google.calendar({ version: 'v3', auth });
+      const tokens = await this.getTokens();
 
       const visitDate = new Date(visit.date);
       const timeMatch = visit.notes?.match(/Time: (\d{2}:\d{2})/);
@@ -279,21 +302,46 @@ export class GoogleCalendarService {
       const endDate = new Date(visitDate);
       endDate.setHours(endDate.getHours() + 1);
 
-      await calendar.events.patch({
-        calendarId: 'primary',
-        eventId: mapping.google_event_id,
-        requestBody: {
-          summary: `${patientName} - ${visit.name}`,
-          start: {
-            dateTime: visitDate.toISOString(),
-            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
-          },
-          end: {
-            dateTime: endDate.toISOString(),
-            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
-          }
+      const event = {
+        summary: `${patientName} - ${visit.name}`,
+        start: {
+          dateTime: visitDate.toISOString(),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        },
+        end: {
+          dateTime: endDate.toISOString(),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
         }
+      };
+
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/google-calendar-sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify({
+          action: 'update',
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          clientId: GOOGLE_CLIENT_ID,
+          clientSecret: GOOGLE_CLIENT_SECRET,
+          eventId: mapping.google_event_id,
+          event
+        })
       });
+
+      if (!response.ok) {
+        throw new Error('Failed to update event');
+      }
+
+      const data = await response.json();
+
+      if (!data.success) {
+        throw new Error(data.error || 'Update failed');
+      }
+
+      await this.updateTokenIfNeeded(data.newAccessToken);
 
       await supabase.from('calendar_event_mappings')
         .update({ last_synced: new Date().toISOString() })
@@ -321,13 +369,35 @@ export class GoogleCalendarService {
         return { success: true };
       }
 
-      const auth = await this.getAuthClient();
-      const calendar = google.calendar({ version: 'v3', auth });
+      const tokens = await this.getTokens();
 
-      await calendar.events.delete({
-        calendarId: 'primary',
-        eventId: mapping.google_event_id
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/google-calendar-sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify({
+          action: 'delete',
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          clientId: GOOGLE_CLIENT_ID,
+          clientSecret: GOOGLE_CLIENT_SECRET,
+          eventId: mapping.google_event_id
+        })
       });
+
+      if (!response.ok) {
+        throw new Error('Failed to delete event');
+      }
+
+      const data = await response.json();
+
+      if (!data.success) {
+        throw new Error(data.error || 'Delete failed');
+      }
+
+      await this.updateTokenIfNeeded(data.newAccessToken);
 
       await supabase.from('calendar_event_mappings')
         .delete()
