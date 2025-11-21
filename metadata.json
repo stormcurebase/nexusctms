@@ -1,0 +1,8 @@
+{
+  "name": "Copy of Nexus Clinical CTMS",
+  "description": "A next-generation Clinical Trial Management System focusing on patient recruitment, retention, and protocol compliance. Features AI-assisted patient screening and data extraction.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
